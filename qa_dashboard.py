@@ -6,6 +6,11 @@ app = marimo.App(width="full")
 
 @app.cell
 def _():
+    import io
+    import uuid
+    import zipfile
+    from datetime import datetime, timezone
+    from xml.sax.saxutils import escape
     import marimo as mo
     import polars as pl
     import plotly.express as px
@@ -13,7 +18,20 @@ def _():
     import ifcopenshell.util.placement
     import ifctester.ids as ids
     import bimpolars as bpl
-    return bpl, ids, ifcopenshell, mo, pl, px
+    return (
+        bpl,
+        datetime,
+        escape,
+        ids,
+        ifcopenshell,
+        io,
+        mo,
+        pl,
+        px,
+        timezone,
+        uuid,
+        zipfile,
+    )
 
 
 @app.cell
@@ -36,7 +54,6 @@ def _(bpl, ids, ifcopenshell, mo, pl):
     ids_doc = ids.open(ids_path)
     ids_doc.validate(model)
 
-    # Extract 3D local placement coordinates (X, Y, Z) for every IFC element
     coord_rows = []
     for idx, prod in enumerate(model.by_type("IfcProduct")):
         guid = getattr(prod, "GlobalId", None)
@@ -99,7 +116,7 @@ def _(bpl, ids, ifcopenshell, mo, pl):
             mo.stat(label="Overall Pass Rate", value=f"{pass_pct}%"),
         ]),
     ])
-    return audit_df, id_col, name_col
+    return audit_df, id_col, ifc_path, name_col
 
 
 @app.cell
@@ -116,7 +133,23 @@ def _(audit_df, mo):
 
 
 @app.cell
-def _(audit_df, class_filter, id_col, mo, name_col, pl, px, status_filter):
+def _(
+    audit_df,
+    class_filter,
+    datetime,
+    escape,
+    id_col,
+    ifc_path,
+    io,
+    mo,
+    name_col,
+    pl,
+    px,
+    status_filter,
+    timezone,
+    uuid,
+    zipfile,
+):
     filtered = audit_df
     if status_filter.value == "Failed IDS Only":
         filtered = filtered.filter(pl.col("ids_status") != "PASS")
@@ -127,6 +160,80 @@ def _(audit_df, class_filter, id_col, mo, name_col, pl, px, status_filter):
 
     if class_filter.value != "All Classes":
         filtered = filtered.filter(pl.col("class").cast(str) == class_filter.value)
+
+    # Build standard BCF 2.1 (.bcfzip) archive for all failed IDS elements in the current filtered view
+    failed_subset = filtered.filter(pl.col("ids_status") != "PASS")
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def build_bcf21_bytes(rows_df: pl.DataFrame) -> bytes:
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr(
+                "bcf.version",
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                "<Version VersionId=\"2.1\" xsi:noNamespaceSchemaLocation=\"version.xsd\" "
+                "xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">\n"
+                "  <DetailedVersion>2.1</DetailedVersion>\n"
+                "</Version>\n",
+            )
+            for idx, row in enumerate(rows_df.to_dicts(), start=1):
+                topic_guid = str(uuid.uuid4())
+                vp_guid = str(uuid.uuid4())
+                ifc_guid = escape(str(row[id_col]))
+                ifc_cls = escape(str(row["class"]))
+                el_name = escape(str(row[name_col] or "<UNNAMED>"))
+                rule_txt = escape(str(row["ids_status"]))
+                x_val, y_val, z_val = float(row["x_m"]), float(row["y_m"]), float(row["z_m"])
+
+                markup = (
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                    "<Markup xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" "
+                    "xsi:noNamespaceSchemaLocation=\"markup.xsd\">\n"
+                    f"  <Header><File IfcProject=\"PRJ01\" isExternal=\"true\"><Filename>{escape(ifc_path)}</Filename><Date>{now_iso}</Date></File></Header>\n"
+                    f"  <Topic Guid=\"{topic_guid}\" TopicType=\"Error\" TopicStatus=\"Open\">\n"
+                    f"    <ReferenceLink>{ifc_guid}</ReferenceLink>\n"
+                    f"    <Title>[IDS QA/QC #{idx:02d}] {ifc_cls} ({el_name}) - {rule_txt}</Title>\n"
+                    f"    <Priority>High</Priority>\n"
+                    f"    <Index>{idx}</Index>\n"
+                    f"    <CreationDate>{now_iso}</CreationDate>\n"
+                    f"    <CreationAuthor>bimpolars-qa-gatekeeper</CreationAuthor>\n"
+                    f"    <Description>Failed buildingSMART IDS 1.0 rule(s): {rule_txt}. Coordinates: ({x_val}, {y_val}, {z_val})m.</Description>\n"
+                    f"  </Topic>\n"
+                    f"  <Viewpoints Guid=\"{vp_guid}\">\n"
+                    f"    <Viewpoint>viewpoint.bcfv</Viewpoint>\n"
+                    f"  </Viewpoints>\n"
+                    "</Markup>\n"
+                )
+                viewpoint = (
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                    "<VisualizationInfo xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" "
+                    "xsi:noNamespaceSchemaLocation=\"visinfo.xsd\">\n"
+                    "  <Components>\n"
+                    "    <Selection>\n"
+                    f"      <Component IfcGuid=\"{ifc_guid}\" />\n"
+                    "    </Selection>\n"
+                    "    <Visibility DefaultVisibility=\"true\" />\n"
+                    "  </Components>\n"
+                    "  <PerspectiveCamera>\n"
+                    f"    <CameraViewPoint><X>{x_val + 4.0}</X><Y>{y_val - 4.0}</Y><Z>{z_val + 3.0}</Z></CameraViewPoint>\n"
+                    "    <CameraDirection><X>-0.6</X><Y>0.6</Y><Z>-0.4</Z></CameraDirection>\n"
+                    "    <CameraUpVector><X>0.0</X><Y>0.0</Y><Z>1.0</Z></CameraUpVector>\n"
+                    "    <FieldOfView>60.0</FieldOfView>\n"
+                    "  </PerspectiveCamera>\n"
+                    "</VisualizationInfo>\n"
+                )
+                zf.writestr(f"{topic_guid}/markup.bcf", markup)
+                zf.writestr(f"{topic_guid}/viewpoint.bcfv", viewpoint)
+        return buf.getvalue()
+
+    bcf_bytes = build_bcf21_bytes(failed_subset)
+    bcf_btn = mo.download(
+        data=bcf_bytes,
+        filename="filtered_ids_issues.bcfzip",
+        mimetype="application/zip",
+        label=f"Download BCF 2.1 Issues ({failed_subset.height} Failed Elements)",
+        disabled=failed_subset.height == 0,
+    )
 
     plot_df = filtered.with_columns([
         pl.col(name_col).cast(pl.Utf8).fill_null("<UNNAMED>").alias("display_name"),
@@ -174,6 +281,7 @@ def _(audit_df, class_filter, id_col, mo, name_col, pl, px, status_filter):
     )
 
     mo.vstack([
+        bcf_btn,
         mo.ui.plotly(fig),
         mo.md(f"**Filtered Audit Records ({filtered.height} of {audit_df.height} elements):**"),
         mo.ui.table(filtered),
