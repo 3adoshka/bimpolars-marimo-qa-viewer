@@ -1,3 +1,5 @@
+[![Interactive Marimo QA/QC Gatekeeper CI](https://github.com/3adoshka/bimpolars-marimo-qa-viewer/actions/workflows/marimo_ci.yml/badge.svg)](https://github.com/3adoshka/bimpolars-marimo-qa-viewer/actions/workflows/marimo_ci.yml)
+
 # Interactive BIM QA/QC & IDS Gatekeeper (`bimpolars` + `Marimo`)
 
 Reactive browser dashboard for BIM Managers and Information Managers to filter IFC4 models by **buildingSMART IDS 1.0** compliance status, IFC class, and unclassified proxies.
