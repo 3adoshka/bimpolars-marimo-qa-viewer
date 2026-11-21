@@ -7,18 +7,22 @@ app = marimo.App(width="full")
 @app.cell
 def _():
     import io
+    import tempfile
     import uuid
     import zipfile
     from datetime import datetime, timezone
+    from pathlib import Path
     from xml.sax.saxutils import escape
     import marimo as mo
     import polars as pl
     import plotly.express as px
     import ifcopenshell
+    import ifcopenshell.util.classification
     import ifcopenshell.util.placement
     import ifctester.ids as ids
     import bimpolars as bpl
     return (
+        Path,
         bpl,
         datetime,
         escape,
@@ -28,6 +32,7 @@ def _():
         mo,
         pl,
         px,
+        tempfile,
         timezone,
         uuid,
         zipfile,
@@ -35,11 +40,32 @@ def _():
 
 
 @app.cell
-def _(bpl, ids, ifcopenshell, mo, pl):
-    ifc_path = "PRJ01-ARC-ZZ-01-M3-A-0001.ifc"
-    ids_path = "client_eir_requirements.ids"
+def _(mo):
+    ifc_upload = mo.ui.file(filetypes=[".ifc"], multiple=False, label="Upload Custom IFC Model (Optional - defaults to sample IFC4)")
+    ids_upload = mo.ui.file(filetypes=[".ids", ".xml"], multiple=False, label="Upload Custom buildingSMART IDS 1.0 File (Optional)")
+    mo.vstack([
+        mo.md("## Universal OpenBIM (IFC + IDS 1.0 + BCF 2.1) 3D QA/QC Gatekeeper"),
+        mo.hstack([ifc_upload, ids_upload]),
+    ])
+    return ifc_upload, ids_upload
 
-    bdf = bpl.read_ifc(ifc_path)
+
+@app.cell
+def _(Path, bpl, ids, ifc_upload, ifcopenshell, ids_upload, mo, pl, tempfile):
+    tmp_dir = Path(tempfile.mkdtemp())
+    if ifc_upload.value:
+        ifc_file = tmp_dir / ifc_upload.name()
+        ifc_file.write_bytes(ifc_upload.contents())
+    else:
+        ifc_file = Path("PRJ01-ARC-ZZ-01-M3-A-0001.ifc")
+
+    if ids_upload.value:
+        ids_file = tmp_dir / ids_upload.name()
+        ids_file.write_bytes(ids_upload.contents())
+    else:
+        ids_file = Path("client_eir_requirements.ids")
+
+    bdf = bpl.read_ifc(str(ifc_file))
     df = bdf.frame
     id_col = "GlobalId" if "GlobalId" in df.columns else "id"
     name_col = "Name" if "Name" in df.columns else "name"
@@ -50,11 +76,12 @@ def _(bpl, ids, ifcopenshell, mo, pl):
     ]
     base_df = df.select(flat_cols).with_columns(pl.col(id_col).cast(pl.Utf8))
 
-    model = ifcopenshell.open(ifc_path)
-    ids_doc = ids.open(ids_path)
+    model = ifcopenshell.open(str(ifc_file))
+    schema_ver = model.schema
+    ids_doc = ids.open(str(ids_file))
     ids_doc.validate(model)
 
-    coord_rows = []
+    coord_rows, class_rows = [], []
     for idx, prod in enumerate(model.by_type("IfcProduct")):
         guid = getattr(prod, "GlobalId", None)
         if not guid:
@@ -66,10 +93,12 @@ def _(bpl, ids, ifcopenshell, mo, pl):
             x, y, z = float(idx * 1.5), -2.0, 0.0
         coord_rows.append({id_col: guid, "x_m": round(x, 3), "y_m": round(y, 3), "z_m": round(z, 3)})
 
-    coords_df = (
-        pl.DataFrame(coord_rows)
-        if coord_rows else pl.DataFrame(schema={id_col: pl.Utf8, "x_m": pl.Float64, "y_m": pl.Float64, "z_m": pl.Float64})
-    )
+        refs = ifcopenshell.util.classification.get_references(prod)
+        codes = [f"{getattr(r, \"Identification\", getattr(r, \"ItemReference\", \"\"))}:{getattr(r, \"Name\", \"\")}" for r in refs]
+        class_rows.append({id_col: guid, "classification_ref": " | ".join(codes) if codes else "UNCLASSIFIED"})
+
+    coords_df = pl.DataFrame(coord_rows) if coord_rows else pl.DataFrame(schema={id_col: pl.Utf8, "x_m": pl.Float64, "y_m": pl.Float64, "z_m": pl.Float64})
+    class_df = pl.DataFrame(class_rows) if class_rows else pl.DataFrame(schema={id_col: pl.Utf8, "classification_ref": pl.Utf8})
 
     failures = []
     for spec in ids_doc.specifications:
@@ -87,9 +116,11 @@ def _(bpl, ids, ifcopenshell, mo, pl):
         base_df
         .join(fail_df, on=id_col, how="left")
         .join(coords_df, on=id_col, how="left")
+        .join(class_df, on=id_col, how="left")
         .with_columns([
             pl.col("ids_status").fill_null("PASS"),
-            (pl.col("class") == "IfcBuildingElementProxy").alias("is_proxy"),
+            pl.col("classification_ref").fill_null("UNCLASSIFIED"),
+            (pl.col("class").cast(pl.Utf8) == "IfcBuildingElementProxy").alias("is_proxy"),
             pl.col("x_m").fill_null(0.0),
             pl.col("y_m").fill_null(0.0),
             pl.col("z_m").fill_null(0.0),
@@ -107,16 +138,15 @@ def _(bpl, ids, ifcopenshell, mo, pl):
     total_el = audit_df.height
     failed_el = audit_df.filter(pl.col("ids_status") != "PASS").height
     pass_pct = round(((total_el - failed_el) / total_el) * 100, 1) if total_el else 100.0
+    ifc_filename = ifc_file.name
 
-    mo.vstack([
-        mo.md(f"## ISO 19650 & IDS Interactive 3D QA/QC Gatekeeper (`{ifc_path}`)"),
-        mo.hstack([
-            mo.stat(label="Total Audited Entities", value=str(total_el)),
-            mo.stat(label="Failed IDS Items", value=str(failed_el)),
-            mo.stat(label="Overall Pass Rate", value=f"{pass_pct}%"),
-        ]),
+    mo.hstack([
+        mo.stat(label="Active Model & Schema", value=f"{ifc_filename} ({schema_ver})"),
+        mo.stat(label="Total Audited Entities", value=str(total_el)),
+        mo.stat(label="Failed IDS Items", value=str(failed_el)),
+        mo.stat(label="Overall Pass Rate", value=f"{pass_pct}%"),
     ])
-    return audit_df, id_col, ifc_path, name_col
+    return audit_df, id_col, ifc_filename, name_col
 
 
 @app.cell
@@ -139,7 +169,7 @@ def _(
     datetime,
     escape,
     id_col,
-    ifc_path,
+    ifc_filename,
     io,
     mo,
     name_col,
@@ -161,7 +191,6 @@ def _(
     if class_filter.value != "All Classes":
         filtered = filtered.filter(pl.col("class").cast(str) == class_filter.value)
 
-    # Build standard BCF 2.1 (.bcfzip) archive for all failed IDS elements in the current filtered view
     failed_subset = filtered.filter(pl.col("ids_status") != "PASS")
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -183,20 +212,20 @@ def _(
                 ifc_cls = escape(str(row["class"]))
                 el_name = escape(str(row[name_col] or "<UNNAMED>"))
                 rule_txt = escape(str(row["ids_status"]))
-                x_val, y_val, z_val = float(row["x_m"]), float(row["y_m"]), float(row["z_m"])
+                x_val, y_val, z_val = float(row["x_m"]), float(row["y_m"]), float(row["z_val" if "z_val" in row else "z_m"])
 
                 markup = (
                     "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
                     "<Markup xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" "
                     "xsi:noNamespaceSchemaLocation=\"markup.xsd\">\n"
-                    f"  <Header><File IfcProject=\"PRJ01\" isExternal=\"true\"><Filename>{escape(ifc_path)}</Filename><Date>{now_iso}</Date></File></Header>\n"
+                    f"  <Header><File IfcProject=\"PRJ01\" isExternal=\"true\"><Filename>{escape(ifc_filename)}</Filename><Date>{now_iso}</Date></File></Header>\n"
                     f"  <Topic Guid=\"{topic_guid}\" TopicType=\"Error\" TopicStatus=\"Open\">\n"
                     f"    <ReferenceLink>{ifc_guid}</ReferenceLink>\n"
-                    f"    <Title>[IDS QA/QC #{idx:02d}] {ifc_cls} ({el_name}) - {rule_txt}</Title>\n"
+                    f"    <Title>[OpenBIM IDS #{idx:02d}] {ifc_cls} ({el_name}) - {rule_txt}</Title>\n"
                     f"    <Priority>High</Priority>\n"
                     f"    <Index>{idx}</Index>\n"
                     f"    <CreationDate>{now_iso}</CreationDate>\n"
-                    f"    <CreationAuthor>bimpolars-qa-gatekeeper</CreationAuthor>\n"
+                    f"    <CreationAuthor>openbim-qa-gatekeeper</CreationAuthor>\n"
                     f"    <Description>Failed buildingSMART IDS 1.0 rule(s): {rule_txt}. Coordinates: ({x_val}, {y_val}, {z_val})m.</Description>\n"
                     f"  </Topic>\n"
                     f"  <Viewpoints Guid=\"{vp_guid}\">\n"
@@ -226,9 +255,8 @@ def _(
                 zf.writestr(f"{topic_guid}/viewpoint.bcfv", viewpoint)
         return buf.getvalue()
 
-    bcf_bytes = build_bcf21_bytes(failed_subset)
     bcf_btn = mo.download(
-        data=bcf_bytes,
+        data=build_bcf21_bytes(failed_subset),
         filename="filtered_ids_issues.bcfzip",
         mimetype="application/zip",
         label=f"Download BCF 2.1 Issues ({failed_subset.height} Failed Elements)",
@@ -248,37 +276,14 @@ def _(
         color="qa_badge",
         symbol="qa_badge",
         hover_name="display_name",
-        hover_data={
-            id_col: True,
-            "ifc_class": True,
-            "ids_status": True,
-            "x_m": True,
-            "y_m": True,
-            "z_m": True,
-        },
-        color_discrete_map={
-            "FAILED IDS": "#EF4444",
-            "UNCLASSIFIED PROXY": "#F59E0B",
-            "PASS": "#10B981",
-        },
-        symbol_map={
-            "FAILED IDS": "diamond",
-            "UNCLASSIFIED PROXY": "square",
-            "PASS": "circle",
-        },
-        title="3D Spatial QA/QC Model View (Red = Failed IDS Requirement)",
+        hover_data={id_col: True, "ifc_class": True, "classification_ref": True, "ids_status": True, "x_m": True, "y_m": True, "z_m": True},
+        color_discrete_map={"FAILED IDS": "#EF4444", "UNCLASSIFIED PROXY": "#F59E0B", "PASS": "#10B981"},
+        symbol_map={"FAILED IDS": "diamond", "UNCLASSIFIED PROXY": "square", "PASS": "circle"},
+        title="3D Spatial OpenBIM QA/QC Model View (Red = Failed IDS Requirement)",
         height=520,
     )
     fig.update_traces(marker=dict(size=9, line=dict(width=1, color="#111827")))
-    fig.update_layout(
-        scene=dict(
-            xaxis_title="X (m)",
-            yaxis_title="Y (m)",
-            zaxis_title="Elevation Z (m)",
-            aspectmode="data",
-        ),
-        margin=dict(l=0, r=0, b=0, t=40),
-    )
+    fig.update_layout(scene=dict(xaxis_title="X (m)", yaxis_title="Y (m)", zaxis_title="Elevation Z (m)", aspectmode="data"), margin=dict(l=0, r=0, b=0, t=40))
 
     mo.vstack([
         bcf_btn,
