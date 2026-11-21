@@ -12,7 +12,7 @@ Reactive browser dashboard for BIM Managers and Information Managers to audit IF
 ## Quickstart
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
-pip install "bimpolars[ifc] @ git+[https://github.com/bedrock-engineer/bimpolars.git](https://github.com/bedrock-engineer/bimpolars.git)" ifcopenshell ifctester polars marimo plotly
+pip install "bimpolars[ifc] @ git+https://github.com/bedrock-engineer/bimpolars.git" ifcopenshell ifctester polars marimo plotly
 python3 generate_sample_ifc.py && python3 generate_sample_ids.py
 marimo run qa_dashboard.py
 ```
