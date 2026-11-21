@@ -1,0 +1,46 @@
+<?xml version='1.0' encoding='utf-8'?>
+<ids xmlns="http://standards.buildingsmart.org/IDS" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://standards.buildingsmart.org/IDS http://standards.buildingsmart.org/IDS/1.0/ids.xsd">
+    <info>
+        <title>PRJ01 Client Exchange Information Requirements (EIR)</title>
+        <copyright>Al-Amin BIM Governance</copyright>
+        <version>1.0</version>
+        <purpose>Milestone Gate 03 - Handover &amp; Fire Compliance</purpose>
+    </info>
+    <specifications>
+        <specification name="WALL-FIRE-01: Mandatory Wall Fire Rating" ifcVersion="IFC4" identifier="IDS-001" description="All walls must carry a valid FireRating in Pset_WallCommon.">
+            <applicability minOccurs="0" maxOccurs="unbounded">
+                <entity>
+                    <name>
+                        <simpleValue>IFCWALL</simpleValue>
+                    </name>
+                </entity>
+            </applicability>
+            <requirements>
+                <property cardinality="required">
+                    <propertySet>
+                        <simpleValue>Pset_WallCommon</simpleValue>
+                    </propertySet>
+                    <baseName>
+                        <simpleValue>FireRating</simpleValue>
+                    </baseName>
+                </property>
+            </requirements>
+        </specification>
+        <specification name="DOOR-ID-01: Mandatory Door Tag/Name" ifcVersion="IFC4" identifier="IDS-002" description="All doors must have a populated Name attribute for COBie schedules.">
+            <applicability minOccurs="0" maxOccurs="unbounded">
+                <entity>
+                    <name>
+                        <simpleValue>IFCDOOR</simpleValue>
+                    </name>
+                </entity>
+            </applicability>
+            <requirements>
+                <attribute cardinality="required">
+                    <name>
+                        <simpleValue>Name</simpleValue>
+                    </name>
+                </attribute>
+            </requirements>
+        </specification>
+    </specifications>
+</ids>
